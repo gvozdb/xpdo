@@ -1,31 +1,49 @@
 <?php
-/**
- * This file is part of the xPDO package.
+/*
+ * Copyright 2010-2015 by MODX, LLC.
  *
- * Copyright (c) Jason Coward <jason@opengeek.com>
+ * This file is part of xPDO.
  *
- * For the full copyright and license information, please view the LICENSE
- * file that was distributed with this source code.
+ * xPDO is free software; you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software
+ * Foundation; either version 2 of the License, or (at your option) any later
+ * version.
+ *
+ * xPDO is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+ * A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * xPDO; if not, write to the Free Software Foundation, Inc., 59 Temple Place,
+ * Suite 330, Boston, MA 02111-1307 USA
  */
 
-namespace xPDO\Compression;
-
-use xPDO\xPDO;
+/**
+ * A class to abstract compression support for ZIP format.
+ *
+ * This file contains the xPDOZip class to represent ZIP archives.
+ *
+ * @package xpdo
+ * @subpackage compression
+ */
 
 /**
  * Represents a compressed archive in ZIP format.
  *
- * @package xPDO/Compression
+ * @package xpdo
+ * @subpackage compression
  */
 class xPDOZip {
     const CREATE = 'create';
     const OVERWRITE = 'overwrite';
     const ZIP_TARGET = 'zip_target';
+    const EXCLUDE = 'exclude';
 
     public $xpdo = null;
     protected $_filename = '';
     protected $_options = array();
     protected $_archive = null;
+    protected $_exclusions = array();
     protected $_errors = array();
 
     /**
@@ -39,11 +57,11 @@ class xPDOZip {
         $this->xpdo =& $xpdo;
         $this->_filename = is_string($filename) ? $filename : '';
         $this->_options = is_array($options) ? $options : array();
-        $this->_archive = new \ZipArchive();
+        $this->_archive = new ZipArchive();
         if (!empty($this->_filename) && file_exists(dirname($this->_filename))) {
             if (file_exists($this->_filename)) {
                 if ($this->getOption(xPDOZip::OVERWRITE, null, false) && is_writable($this->_filename)) {
-                    if ($this->_archive->open($this->_filename, \ZipArchive::OVERWRITE) !== true) {
+                    if ($this->_archive->open($this->_filename, ZIPARCHIVE::OVERWRITE) !== true) {
                         $this->xpdo->log(xPDO::LOG_LEVEL_ERROR, "xPDOZip: Error opening archive at {$this->_filename} for OVERWRITE");
                     }
                 } else {
@@ -52,7 +70,7 @@ class xPDOZip {
                     }
                 }
             } elseif ($this->getOption(xPDOZip::CREATE, null, false) && is_writable(dirname($this->_filename))) {
-                if ($this->_archive->open($this->_filename, \ZipArchive::CREATE) !== true) {
+                if ($this->_archive->open($this->_filename, ZIPARCHIVE::CREATE) !== true) {
                     $this->xpdo->log(xPDO::LOG_LEVEL_ERROR, "xPDOZip: Could not create archive at {$this->_filename}");
                 }
             } else {
@@ -89,30 +107,34 @@ class xPDOZip {
                         }
                     }
                     while (($file = readdir($dh)) !== false) {
-                        if (is_dir($source . $file)) {
-                            if (($file !== '.') && ($file !== '..')) {
-                                $results = $results + $this->pack($source . $file . '/', array_merge($options, array(xPDOZip::ZIP_TARGET => $target . $file . '/')));
-                            }
-                        } elseif (is_file($source . $file)) {
-                            if ($this->_archive->addFile($source . $file, $target . $file)) {
-                                $results[$target . $file] = "Successfully packed {$target}{$file} from {$source}{$file}";
+                        if ($this->checkExclude($target . $file, $options)) {
+                            if (is_dir($source . $file)) {
+                                if (($file !== '.') && ($file !== '..')) {
+                                    $results = $results + $this->pack($source . $file . '/', array_merge($options, array(xPDOZip::ZIP_TARGET => $target . $file . '/')));
+                                }
+                            } elseif (is_file($source . $file)) {
+                                if ($this->_archive->addFile($source . $file, $target . $file)) {
+                                    $results[$target . $file] = "Successfully packed {$target}{$file} from {$source}{$file}";
+                                } else {
+                                    $results[$target . $file] = "Error packing {$target}{$file} from {$source}{$file}";
+                                    $this->_errors[] = $results[$target . $file];
+                                }
                             } else {
                                 $results[$target . $file] = "Error packing {$target}{$file} from {$source}{$file}";
                                 $this->_errors[] = $results[$target . $file];
                             }
-                        } else {
-                            $results[$target . $file] = "Error packing {$target}{$file} from {$source}{$file}";
-                            $this->_errors[] = $results[$target . $file];
                         }
                     }
                 }
             } elseif (is_file($source)) {
                 $file = basename($source);
-                if ($this->_archive->addFile($source, $target . $file)) {
-                    $results[$target . $file] = "Successfully packed {$target}{$file} from {$source}";
-                } else {
-                    $results[$target . $file] = "Error packing {$target}{$file} from {$source}";
-                    $this->_errors[] = $results[$target . $file];
+                if ($this->checkExclude($target . $file, $options)) {
+                    if ($this->_archive->addFile($source, $target . $file)) {
+                        $results[$target . $file] = "Successfully packed {$target}{$file} from {$source}";
+                    } else {
+                        $results[$target . $file] = "Error packing {$target}{$file} from {$source}";
+                        $this->_errors[] = $results[$target . $file];
+                    }
                 }
             } else {
                 $this->_errors[]= "Invalid source specified: {$source}";
@@ -145,6 +167,37 @@ class xPDOZip {
         if ($this->_archive) {
             $this->_archive->close();
         }
+    }
+
+    /**
+     * Check files exclude regular expression.
+     * 
+     * @param string $target
+     * @param array $options
+     * @return bool
+     */
+    protected function checkExclude($target, $options = array()) {
+        $allow = true;
+        if (empty($this->_exclusions)) {
+            $exclude = $this->getOption(xPDOZip::EXCLUDE, $options, null);
+            switch (true) {
+                case (is_string($exclude)):
+                    $exclude = explode(',', $exclude);
+                case (is_array($exclude)):
+                    if (!$exclude = array_diff(array_map('trim', $exclude), array(''))) {
+                        $exclude = null;
+                    }
+            }
+            $this->_exclusions = $exclude;
+        }
+        if (!empty($this->_exclusions)) {
+            foreach ($this->_exclusions as $v) {
+                if (preg_match('/' . $v . '/u', $target)) {
+                    $allow = false;
+                }
+            }
+        }
+        return $allow;
     }
 
     /**
